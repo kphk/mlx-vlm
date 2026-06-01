@@ -1898,6 +1898,83 @@ def test_chat_completions_streaming_tool_calls_emit_usage_chunk(client, monkeypa
     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 2
 
 
+def test_chat_completions_streaming_reasoning_tool_call_markup_is_suppressed(
+    client, monkeypatch
+):
+    model = SimpleNamespace()
+    processor = SimpleNamespace()
+    config = SimpleNamespace(model_type="qwen2_vl")
+
+    class FakeTokenizer:
+        think_end_id = 99
+        unk_token_id = -1
+
+        def decode(self, tokens):
+            return ""
+
+        def convert_tokens_to_ids(self, token):
+            return self.think_end_id if token == "</think>" else self.unk_token_id
+
+    class FakeResponseGenerator:
+        tokenizer = FakeTokenizer()
+
+        def validate_context_budget(self, prompt, images=None, audio=None, args=None):
+            return None
+
+        def generate(self, prompt, images=None, audio=None, args=None):
+            return server.GenerationContext(uid=1, prompt_tokens=10), iter(
+                [
+                    server.StreamingToken(
+                        text="Need to start a local server.\n\n",
+                        token=1,
+                        logprobs=0.0,
+                        finish_reason=None,
+                    ),
+                    server.StreamingToken(
+                        text=(
+                            '<tool_call>{"name":"bash","arguments":{"command":"pwd"}}'
+                            "</tool_call>"
+                        ),
+                        token=2,
+                        logprobs=0.0,
+                        finish_reason="stop",
+                    ),
+                ]
+            )
+
+    tool_module = SimpleNamespace(
+        tool_call_start="<tool_call>",
+        tool_call_end="</tool_call>",
+        parse_tool_call=lambda call, tools: json.loads(call),
+    )
+    monkeypatch.setattr(server.runtime, "response_generator", FakeResponseGenerator())
+
+    with (
+        patch.object(
+            server, "get_cached_model", return_value=(model, processor, config)
+        ),
+        patch.object(server, "apply_chat_template", return_value="prompt"),
+        patch.object(server, "_infer_tool_parser_from_processor", return_value="demo"),
+        patch.object(server, "load_tool_module", return_value=tool_module),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={
+                "model": "demo",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+                "enable_thinking": True,
+                "tools": [{"type": "function", "function": {"name": "bash"}}],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert '"reasoning":"Need to start a local server.' in body
+    assert "<tool_call>" not in body
+    assert '"tool_calls"' in body
+
+
 def test_chat_completions_endpoint_flattens_text_content_parts(client):
     model = SimpleNamespace()
     processor = SimpleNamespace()
@@ -3424,6 +3501,39 @@ class TestResponseGenerator:
 
         assert server._build_gen_args(req).enable_thinking is True
 
+    def test_build_gen_args_uses_server_thinking_budget_default_when_omitted(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("MLX_VLM_THINKING_BUDGET", "1024")
+        req = server.ChatRequest(
+            model="demo",
+            messages=[server.ChatMessage(role="user", content="hi")],
+        )
+
+        assert "thinking_budget" not in req.model_fields_set
+        assert server._build_gen_args(req).thinking_budget == 1024
+
+    def test_build_gen_args_request_thinking_budget_overrides_server_default(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("MLX_VLM_THINKING_BUDGET", "1024")
+        req = server.ChatRequest(
+            model="demo",
+            messages=[server.ChatMessage(role="user", content="hi")],
+            thinking_budget=256,
+        )
+
+        assert server._build_gen_args(req).thinking_budget == 256
+
+    def test_build_gen_args_keeps_no_thinking_budget_when_unset(self, monkeypatch):
+        monkeypatch.delenv("MLX_VLM_THINKING_BUDGET", raising=False)
+        req = server.ChatRequest(
+            model="demo",
+            messages=[server.ChatMessage(role="user", content="hi")],
+        )
+
+        assert server._build_gen_args(req).thinking_budget is None
+
     def test_gpu_embed_hashes_pixel_values_without_image_ref(self):
         class Embed:
             def to_dict(self):
@@ -3639,6 +3749,13 @@ class TestSuppressToolCallContent:
         )
         assert in_tc is True
         assert content is None
+
+    def test_suppresses_tool_call_markup_from_reasoning_text(self):
+        in_tc, text = server.suppress_tool_call_content(
+            "thought<tool_call>", False, "<tool_call>", "ght<tool_call>"
+        )
+        assert in_tc is True
+        assert text == "ght"
 
     def test_preserves_prefix_before_tool_call_marker(self):
         in_tc, content = server.suppress_tool_call_content(

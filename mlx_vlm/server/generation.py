@@ -111,6 +111,13 @@ def get_server_enable_thinking():
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+def get_server_thinking_budget():
+    raw = os.environ.get("MLX_VLM_THINKING_BUDGET")
+    if raw in (None, ""):
+        return None
+    return int(raw)
+
+
 def get_quantized_kv_bits(model: str):
     kv_bits = float(os.environ.get("KV_BITS", 0))
     if kv_bits == 0:

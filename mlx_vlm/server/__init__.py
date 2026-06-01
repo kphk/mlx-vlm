@@ -68,6 +68,7 @@ from .generation import (
     get_quantized_kv_start,
     get_server_enable_thinking,
     get_server_max_tokens,
+    get_server_thinking_budget,
     get_speculative_batch_coalesce_s,
     get_token_queue_timeout,
     get_top_logprobs_k,

@@ -29,28 +29,30 @@ def suppress_tool_call_content(
     full_output: str,
     in_tool_call: bool,
     tc_start: Optional[str],
-    delta_content: Optional[str],
+    delta_text: Optional[str],
 ) -> Tuple[bool, Optional[str]]:
-    """Suppress tool-call markup from streamed delta.content.
+    """Suppress tool-call markup from streamed text deltas.
 
     If the tool-call marker begins mid-delta, emit the prefix before the marker and
-    suppress only the marker and everything after it.
+    suppress only the marker and everything after it. This is used for both
+    assistant content and reasoning text so raw tool-call markup does not leak
+    into user-visible output.
     """
     if not tc_start:
-        return in_tool_call, delta_content
+        return in_tool_call, delta_text
     if in_tool_call:
         return True, None
     if tc_start in full_output:
-        if delta_content:
-            pre_delta = full_output[: -len(delta_content)]
+        if delta_text:
+            pre_delta = full_output[: -len(delta_text)]
             if tc_start not in pre_delta:
                 offset = full_output.find(tc_start) - len(pre_delta)
                 if offset > 0:
-                    return True, delta_content[:offset]
+                    return True, delta_text[:offset]
         return True, None
     if any(full_output.endswith(tc_start[:j]) for j in range(2, len(tc_start))):
         return False, None
-    return in_tool_call, delta_content
+    return in_tool_call, delta_text
 
 
 def process_tool_calls(model_output: str, tool_module, tools):

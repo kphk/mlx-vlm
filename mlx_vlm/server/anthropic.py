@@ -656,6 +656,9 @@ async def anthropic_messages_endpoint(http_request: Request):
                         else:
                             delta_content = delta
 
+                        in_tool_call, delta_reasoning = suppress_tool_call_content(
+                            full_output, in_tool_call, tc_start, delta_reasoning
+                        )
                         in_tool_call, delta_content = suppress_tool_call_content(
                             full_output, in_tool_call, tc_start, delta_content
                         )

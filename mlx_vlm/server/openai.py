@@ -1603,7 +1603,11 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 delta_content = token.text
                                 accumulated = token.text
 
-                            # Suppress tool-call markup from content
+                            # Suppress tool-call markup from reasoning/content so
+                            # raw tool-call XML does not leak into visible text.
+                            in_tool_call, delta_reasoning = suppress_tool_call_content(
+                                full_output, in_tool_call, tc_start, delta_reasoning
+                            )
                             in_tool_call, delta_content = suppress_tool_call_content(
                                 full_output, in_tool_call, tc_start, delta_content
                             )

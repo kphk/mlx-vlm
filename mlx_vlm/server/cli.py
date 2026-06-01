@@ -77,6 +77,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--thinking-budget",
+        type=int,
+        default=None,
+        help=(
+            "Default max thinking tokens for requests that do not set "
+            "thinking_budget explicitly."
+        ),
+    )
+    parser.add_argument(
         "--kv-bits",
         type=float,
         default=None,
@@ -170,6 +179,8 @@ def main():
         os.environ["PREFILL_STEP_SIZE"] = str(args.prefill_step_size)
     os.environ["MLX_VLM_MAX_TOKENS"] = str(args.max_tokens)
     os.environ["MLX_VLM_ENABLE_THINKING"] = "1" if args.enable_thinking else "0"
+    if args.thinking_budget is not None:
+        os.environ["MLX_VLM_THINKING_BUDGET"] = str(args.thinking_budget)
     if args.kv_bits is not None:
         os.environ["KV_BITS"] = str(args.kv_bits)
     os.environ["KV_GROUP_SIZE"] = str(args.kv_group_size)

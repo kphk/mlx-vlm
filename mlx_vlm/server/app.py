@@ -38,6 +38,7 @@ from .generation import (
     get_quantized_kv_start,
     get_server_enable_thinking,
     get_server_max_tokens,
+    get_server_thinking_budget,
     get_top_logprobs_k,
 )
 from .openai import register_routes as register_openai_routes
@@ -133,7 +134,11 @@ def _build_gen_args(
         ),
         logit_bias=logit_bias,
         enable_thinking=enable_thinking,
-        thinking_budget=getattr(request, "thinking_budget", None),
+        thinking_budget=_request_field_or_default(
+            request,
+            "thinking_budget",
+            get_server_thinking_budget(),
+        ),
         thinking_start_token=getattr(request, "thinking_start_token", None),
         thinking_end_token=getattr(request, "thinking_end_token", None),
         tenant_id=tenant_id,
