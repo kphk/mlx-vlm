@@ -31,17 +31,25 @@ def suppress_tool_call_content(
     tc_start: Optional[str],
     delta_content: Optional[str],
 ) -> Tuple[bool, Optional[str]]:
-    """Suppress tool-call markup from streamed delta.content."""
+    """Suppress tool-call markup from streamed delta.content.
+
+    If the tool-call marker begins mid-delta, emit the prefix before the marker and
+    suppress only the marker and everything after it.
+    """
     if not tc_start:
         return in_tool_call, delta_content
-    if not in_tool_call:
-        if tc_start in full_output:
-            return True, None
-
-        if any(full_output.endswith(tc_start[:j]) for j in range(2, len(tc_start))):
-            return False, None
-    else:
+    if in_tool_call:
         return True, None
+    if tc_start in full_output:
+        if delta_content:
+            pre_delta = full_output[: -len(delta_content)]
+            if tc_start not in pre_delta:
+                offset = full_output.find(tc_start) - len(pre_delta)
+                if offset > 0:
+                    return True, delta_content[:offset]
+        return True, None
+    if any(full_output.endswith(tc_start[:j]) for j in range(2, len(tc_start))):
+        return False, None
     return in_tool_call, delta_content
 
 

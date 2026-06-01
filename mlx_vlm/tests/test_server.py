@@ -1441,6 +1441,140 @@ def test_chat_completions_streaming_forwards_explicit_sampling_args(
     assert captured["args"].logit_bias == {12: -1.5}
 
 
+def test_chat_completions_streaming_enable_thinking_keeps_reasoning_out_of_content(
+    client, monkeypatch
+):
+    model = SimpleNamespace()
+    processor = SimpleNamespace()
+    config = SimpleNamespace(model_type="qwen2_vl")
+
+    class FakeTokenizer:
+        think_end_id = 99
+        unk_token_id = -1
+
+        def decode(self, tokens):
+            return ""
+
+        def convert_tokens_to_ids(self, token):
+            return self.think_end_id if token == "</think>" else self.unk_token_id
+
+    class FakeResponseGenerator:
+        tokenizer = FakeTokenizer()
+
+        def validate_context_budget(self, prompt, images=None, audio=None, args=None):
+            return None
+
+        def generate(self, prompt, images=None, audio=None, args=None):
+            return server.GenerationContext(uid=1, prompt_tokens=8), iter(
+                [
+                    server.StreamingToken(
+                        text="reasoning ", token=1, logprobs=0.0, finish_reason=None
+                    ),
+                    server.StreamingToken(
+                        text="", token=99, logprobs=0.0, finish_reason=None
+                    ),
+                    server.StreamingToken(
+                        text="close</think>\n\nanswer",
+                        token=2,
+                        logprobs=0.0,
+                        finish_reason="stop",
+                    ),
+                ]
+            )
+
+    monkeypatch.setattr(server.runtime, "response_generator", FakeResponseGenerator())
+
+    with (
+        patch.object(
+            server, "get_cached_model", return_value=(model, processor, config)
+        ),
+        patch.object(server, "apply_chat_template", return_value="prompt"),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={
+                "model": "demo",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+                "max_tokens": 12,
+                "enable_thinking": True,
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert '"reasoning":"reasoning "' in body
+    assert '"reasoning":"close"' in body
+    assert '"content":"answer"' in body
+    assert "</think>" not in body
+
+
+def test_chat_completions_streaming_stop_without_visible_answer_falls_back_to_content(
+    client, monkeypatch
+):
+    model = SimpleNamespace()
+    processor = SimpleNamespace()
+    config = SimpleNamespace(model_type="qwen2_vl")
+
+    class FakeTokenizer:
+        think_end_id = 99
+        unk_token_id = -1
+
+        def decode(self, tokens):
+            return ""
+
+        def convert_tokens_to_ids(self, token):
+            return self.think_end_id if token == "</think>" else self.unk_token_id
+
+    class FakeResponseGenerator:
+        tokenizer = FakeTokenizer()
+
+        def validate_context_budget(self, prompt, images=None, audio=None, args=None):
+            return None
+
+        def generate(self, prompt, images=None, audio=None, args=None):
+            return server.GenerationContext(uid=1, prompt_tokens=8), iter(
+                [
+                    server.StreamingToken(
+                        text="The user is asking about Rust's pros and cons.",
+                        token=1,
+                        logprobs=0.0,
+                        finish_reason=None,
+                    ),
+                    server.StreamingToken(
+                        text="\n\n**Pros:**\n- Memory safety\n\n**Cons:**\n- Steep learning curve",
+                        token=2,
+                        logprobs=0.0,
+                        finish_reason="stop",
+                    ),
+                ]
+            )
+
+    monkeypatch.setattr(server.runtime, "response_generator", FakeResponseGenerator())
+
+    with (
+        patch.object(
+            server, "get_cached_model", return_value=(model, processor, config)
+        ),
+        patch.object(server, "apply_chat_template", return_value="prompt"),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={
+                "model": "demo",
+                "messages": [{"role": "user", "content": "Explain the pros and cons of Rust"}],
+                "stream": True,
+                "max_tokens": 64,
+                "enable_thinking": True,
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert '"reasoning":"The user is asking about Rust' in body
+    assert '"content":"**Pros:**\\n- Memory safety\\n\\n**Cons:**\\n- Steep learning curve"' in body
+
+
 @pytest.mark.parametrize(
     "audio_data_factory",
     [
@@ -3505,6 +3639,13 @@ class TestSuppressToolCallContent:
         )
         assert in_tc is True
         assert content is None
+
+    def test_preserves_prefix_before_tool_call_marker(self):
+        in_tc, content = server.suppress_tool_call_content(
+            "prefix<tool_call>", False, "<tool_call>", "fix<tool_call>"
+        )
+        assert in_tc is True
+        assert content == "fix"
 
     def test_pipe_delimited_marker(self):
         in_tc, content = server.suppress_tool_call_content(

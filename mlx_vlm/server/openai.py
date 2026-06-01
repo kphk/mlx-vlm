@@ -140,6 +140,47 @@ def _decode_input_audio_data(input_audio: InputAudio):
         return data
 
 
+def _fallback_visible_content_from_reasoning(reasoning_text: str) -> Optional[str]:
+    """Extract a visible reply when a stream ends with reasoning only.
+
+    Qwen3 can occasionally finish with `stop` before the server observes a clean
+    thinking-to-answer boundary. In that case, salvage the first non-meta section of
+    the reasoning stream as the visible assistant reply.
+    """
+    text = (reasoning_text or "").strip()
+    if not text:
+        return None
+
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+    if not paragraphs:
+        return text
+
+    meta_prefixes = (
+        "the user ",
+        "this is ",
+        "i need ",
+        "i should ",
+        "i will ",
+        "i'll ",
+        "let me ",
+        "understand ",
+        "identify ",
+        "here's a thinking process",
+        "plan:",
+        "approach:",
+    )
+    answer_markers = ("**", "#", "- ", "* ", "1. ", "2. ", "3. ", "pros:", "cons:")
+
+    for index, paragraph in enumerate(paragraphs):
+        lowered = paragraph.lower()
+        if paragraph.startswith(answer_markers) or lowered.startswith("pros:"):
+            return "\n\n".join(paragraphs[index:])
+        if not lowered.startswith(meta_prefixes):
+            return "\n\n".join(paragraphs[index:])
+
+    return None
+
+
 def _final_chat_chunk(
     request_id: str,
     model: str,
@@ -1433,10 +1474,30 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
 
                         output_tokens = 0
                         request_id = f"chatcmpl-{uuid.uuid4()}"
-                        # Track thinking state for reasoning/content split
-                        in_thinking = False
+                        # Start in thinking mode when enable_thinking injected the
+                        # opening tag into the prompt rather than the generated text.
+                        in_thinking = gen_args.enable_thinking
                         accumulated = ""
                         full_output = ""  # raw output for tool call parsing
+                        think_end_id = None
+                        try:
+                            tokenizer = runtime.response_generator.tokenizer
+                            if hasattr(tokenizer, "think_end_id"):
+                                think_end_id = tokenizer.think_end_id
+                            elif hasattr(tokenizer, "convert_tokens_to_ids"):
+                                unk_token_id = getattr(tokenizer, "unk_token_id", None)
+                                token_id = tokenizer.convert_tokens_to_ids("</think>")
+                                if token_id != unk_token_id:
+                                    think_end_id = token_id
+                        except Exception:
+                            pass
+                        thinking_done = not in_thinking
+                        think_pending_max = 5
+                        think_pending_cap = 25
+                        think_end_pending = 0
+                        pending_buffer = []
+                        streamed_reasoning = []
+                        content_emitted = False
                         # Track tool-call state to suppress markup from content
                         in_tool_call = False
                         tc_start = tool_module.tool_call_start if tool_module else None
@@ -1461,7 +1522,57 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             delta_reasoning = None
                             delta_content = None
 
-                            if not in_thinking and (
+                            if think_end_pending > 0:
+                                pending_buffer.append(token)
+                                combined = "".join(t.text for t in pending_buffer)
+                                has_content = bool(combined)
+                                content_at_cap = (
+                                    has_content and think_end_pending >= think_pending_max
+                                )
+                                hard_cap = think_end_pending >= think_pending_cap
+                                confirmed = False
+                                for tag in ("</think>", "<channel|>"):
+                                    if tag in combined:
+                                        confirmed = combined.split(tag, 1)[1].startswith(
+                                            "\n\n"
+                                        )
+                                        break
+                                if not confirmed and token.finish_reason and not combined:
+                                    confirmed = True
+                                if (
+                                    confirmed
+                                    or token.finish_reason
+                                    or content_at_cap
+                                    or hard_cap
+                                ):
+                                    if confirmed:
+                                        in_thinking = False
+                                        thinking_done = True
+                                        thinking_tail = None
+                                        tail = None
+                                        for tag in ("</think>", "<channel|>"):
+                                            if tag in combined:
+                                                parts = combined.split(tag, 1)
+                                                thinking_tail = (
+                                                    parts[0].rstrip("\n") or None
+                                                )
+                                                tail = parts[1].lstrip("\n") or None
+                                                break
+                                        if tail is None and "\n" in combined:
+                                            tail = (
+                                                combined.split("\n", 1)[1].lstrip("\n")
+                                                or None
+                                            )
+                                        delta_reasoning = thinking_tail
+                                        delta_content = tail
+                                    else:
+                                        delta_reasoning = combined or None
+                                    think_end_pending = 0
+                                    pending_buffer = []
+                                else:
+                                    think_end_pending += 1
+                                accumulated = token.text
+                            elif not in_thinking and not thinking_done and (
                                 "<|channel>thought" in accumulated
                                 or "<think>" in accumulated
                             ):
@@ -1469,24 +1580,37 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 accumulated = ""
                                 # Don't emit opening tag tokens
                             elif in_thinking and (
-                                "<channel|>" in accumulated or "</think>" in accumulated
+                                (think_end_id is not None and token.token == think_end_id)
+                                or (
+                                    think_end_id is None
+                                    and (
+                                        "<channel|>" in accumulated
+                                        or "</think>" in accumulated
+                                    )
+                                )
                             ):
-                                in_thinking = False
-                                accumulated = ""
-                                # Don't emit closing tag tokens
+                                think_end_pending = 1
+                                pending_buffer = []
+                                accumulated = token.text
                             elif in_thinking:
                                 delta_reasoning = token.text
-                            elif not in_thinking and (
+                                accumulated = token.text
+                            elif not in_thinking and not thinking_done and (
                                 "<|channel>" in accumulated or "<think" in accumulated
                             ):
                                 pass  # Partial tag, don't emit yet
                             else:
                                 delta_content = token.text
+                                accumulated = token.text
 
                             # Suppress tool-call markup from content
                             in_tool_call, delta_content = suppress_tool_call_content(
                                 full_output, in_tool_call, tc_start, delta_content
                             )
+                            if delta_reasoning:
+                                streamed_reasoning.append(delta_reasoning)
+                            if delta_content:
+                                content_emitted = True
 
                             chunk_logprobs = None
                             if request.logprobs and token.finish_reason != "stop":
@@ -1505,8 +1629,9 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
 
                             # Skip empty deltas (e.g. suppressed tool-call tokens)
                             has_payload = (
-                                delta_content is not None
-                                or delta_reasoning is not None
+                                bool(delta_content)
+                                or bool(delta_reasoning)
+                                or token.finish_reason is not None
                                 or chunk_logprobs is not None
                             )
                             if has_payload:
@@ -1555,6 +1680,30 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                     created=int(time.time()),
                                     model=request.model,
                                     choices=choices,
+                                )
+                                yield f"data: {chunk_data.model_dump_json()}\n\n"
+                        if (
+                            finish_reason == "stop"
+                            and not tool_calls_made
+                            and not content_emitted
+                            and streamed_reasoning
+                        ):
+                            fallback_content = _fallback_visible_content_from_reasoning(
+                                "".join(streamed_reasoning)
+                            )
+                            if fallback_content:
+                                chunk_data = ChatStreamChunk(
+                                    id=request_id,
+                                    created=int(time.time()),
+                                    model=request.model,
+                                    choices=[
+                                        ChatStreamChoice(
+                                            delta=ChatMessage(
+                                                role="assistant",
+                                                content=fallback_content,
+                                            )
+                                        )
+                                    ],
                                 )
                                 yield f"data: {chunk_data.model_dump_json()}\n\n"
                         if not terminal_emitted:
