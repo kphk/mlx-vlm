@@ -647,6 +647,11 @@ async def anthropic_messages_endpoint(http_request: Request):
                             yield close_open_block()
                             in_thinking = False
                             accumulated = ""
+                        elif in_thinking and (
+                            "<|channel>thought" in accumulated
+                            or "<think>" in accumulated
+                        ):
+                            accumulated = ""
                         elif in_thinking:
                             delta_reasoning = delta
                         elif not in_thinking and (

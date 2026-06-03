@@ -276,6 +276,9 @@ def _split_thinking(text: str) -> Tuple[Optional[str], str]:
             return reasoning or None, content
         reasoning = parts[0].replace("<|channel>thought", "").lstrip("thought").strip()
         return reasoning or None, ""
+    if "<|channel>thought" in text:
+        reasoning = text.split("<|channel>thought", 1)[1].strip()
+        return reasoning or None, ""
     # Handle <think>...</think> format (qwen3.5 etc)
     # Also handle partial: output starts with thinking text + </think> (no opening tag)
     if "<think>" in text or "</think>" in text:

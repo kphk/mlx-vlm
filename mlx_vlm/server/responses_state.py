@@ -145,6 +145,11 @@ def _split_thinking(text: str) -> Tuple[Optional[str], str]:
             content = (text[:start] + text[end + len(end_marker) :]).strip()
             return reasoning or None, content
 
+    if "<|channel>thought" in text:
+        start = text.find("<|channel>thought")
+        reasoning = text[start + len("<|channel>thought") :].strip()
+        return reasoning or None, ""
+
     return None, text.strip()
 
 

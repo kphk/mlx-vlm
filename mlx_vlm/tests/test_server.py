@@ -3687,6 +3687,12 @@ class TestSplitThinking:
         assert reasoning == "Only thinking."
         assert content == ""
 
+    def test_open_channel_tag_without_close_is_reasoning_only(self):
+        text = "<|channel>thought\nOnly thinking."
+        reasoning, content = server._split_thinking(text)
+        assert reasoning == "Only thinking."
+        assert content == ""
+
 
 class TestChatMessageSchema:
     """Tests for ChatMessage accepting tool-calling roles and fields."""
@@ -3811,3 +3817,13 @@ class TestCountThinkingTagTokens:
 
     def test_no_tags(self):
         assert server._count_thinking_tag_tokens("plain text") == 0
+
+
+class TestFallbackVisibleContentFromReasoning:
+    def test_does_not_promote_raw_channel_marker_to_content(self):
+        assert (
+            server_openai._fallback_visible_content_from_reasoning(
+                "<|channel>thought\nOnly thinking."
+            )
+            is None
+        )

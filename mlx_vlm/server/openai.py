@@ -150,6 +150,8 @@ def _fallback_visible_content_from_reasoning(reasoning_text: str) -> Optional[st
     text = (reasoning_text or "").strip()
     if not text:
         return None
+    if "<|channel>thought" in text or "<channel|>" in text or "<think>" in text:
+        return None
 
     paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
     if not paragraphs:
@@ -1592,6 +1594,11 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 think_end_pending = 1
                                 pending_buffer = []
                                 accumulated = token.text
+                            elif in_thinking and (
+                                "<|channel>thought" in accumulated
+                                or "<think>" in accumulated
+                            ):
+                                accumulated = ""
                             elif in_thinking:
                                 delta_reasoning = token.text
                                 accumulated = token.text
